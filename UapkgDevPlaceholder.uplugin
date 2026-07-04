@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "UAPKG Dev Placeholder",
+	"Description": "Barebones placeholder Unreal Engine plugin used to test UAPKG publishing end-to-end. Not for production use.",
+	"Category": "UAPKG",
+	"CreatedBy": "MaximDevoir",
+	"CreatedByURL": "https://github.com/MaximDevoir",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "UapkgDevPlaceholder",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}

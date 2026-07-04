@@ -1,0 +1,8 @@
+{
+  "name": "uapkg-dev-package-placeholder",
+  "version": "0.1.0",
+  "kind": "plugin",
+  "publish": {
+    "registry": "default"
+  }
+}
