@@ -61,4 +61,23 @@ On each `v*` tag the workflow:
 To publish a new version later: bump `version` in `uapkg.json`, commit, and push a matching
 tag (e.g. `v0.2.0`).
 
+## Setting up trusted publishing (for when `uapkg publish` lands)
+
+Trusted publishing lets the workflow publish with a short-lived OIDC token instead of a
+long-lived PAT. Rough setup (see the UAPKG spec §12):
+
+1. Create a UAPKG account and complete MFA.
+2. Do the **initial** publish of this package with a UAPKG PAT (OIDC can't publish a package
+   that doesn't exist yet). Until the CLI has `publish`, this is a manual/registry step.
+3. Link your GitHub account via the UAPKG GitHub User App and install it on this repo.
+4. Create a trusted publisher rule binding:
+   - `provider = github-actions`
+   - owner `MaximDevoir`, repo `uapkg-dev-package-placeholder`
+   - workflow file `publish.yml`
+5. After that, `uapkg publish` runs in this workflow will auto-exchange the GitHub Actions
+   OIDC token (`id-token: write` is already granted) — no secret needed.
+
+Until trusted publishing is set up, use the PAT fallback documented in `publish.yml`
+(`UAPKG_TOKEN` repo secret).
+
 > This is a development/test artifact — not intended for real use.
