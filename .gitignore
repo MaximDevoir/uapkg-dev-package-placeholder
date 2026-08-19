@@ -82,3 +82,6 @@ dist/
 # packaged builds
 *.tgz
 *.tgz.integrity
+
+# UAPKG source checkout used by the composite action (fallback path)
+.uapkg-source/

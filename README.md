@@ -1,83 +1,113 @@
 # uapkg-dev-package-placeholder
 
-A **barebones placeholder Unreal Engine plugin** whose only job is to exercise the
-[UAPKG](https://github.com/MaximDevoir/uapkg) publishing pipeline end-to-end. The plugin
-source does nothing meaningful — it exists so there is a real, packable, publishable
-package to test against.
+A barebones Unreal Engine plugin for exercising the
+[UAPKG](https://github.com/MaximDevoir/uapkg) release and publishing pipeline. The plugin
+source does nothing meaningful; this repository is a deliberately flexible test fixture.
 
-## What's in here
+Nothing runs automatically on pushes or tags. Release creation, release deletion, and
+registry publishing are separate manually dispatched workflows.
+
+## Repository contents
 
 | Path | Purpose |
 |---|---|
-| `uapkg.json` | UAPKG package manifest (plugin) — everything the registry needs to publish. |
-| `UapkgDevPlaceholder.uplugin` | Unreal plugin descriptor (required by `uapkg pack`). |
-| `Source/UapkgDevPlaceholder/` | Throwaway module boilerplate (`Build.cs`, `Public/`, `Private/`). |
-| `.github/workflows/publish.yml` | On a `v*` tag: pack → GitHub Release → publish. |
-| `.gitignore` | Standard Unreal Engine ignores. |
+| `uapkg.json` | UAPKG package manifest and package version. |
+| `UapkgDevPlaceholder.uplugin` | Minimal Unreal plugin descriptor. |
+| `Source/UapkgDevPlaceholder/` | Throwaway Unreal module boilerplate. |
+| `.github/actions/setup-uapkg/` | Builds a selected UAPKG source branch once and exposes its CLI. |
+| `.github/workflows/create-release.yml` | Packs and creates one or more GitHub Releases. |
+| `.github/workflows/delete-github-releases.yml` | Deletes one or more releases and their tags. |
+| `.github/workflows/publish-oidc.yml` | Publishes one existing release with GitHub Actions OIDC. |
 
-### `uapkg.json`
+Packed archives intentionally exclude Git metadata, GitHub workflows, toolchain checkouts,
+caches, dependencies, and previously generated archives.
 
-```json
-{
-  "name": "uapkg-dev-package-placeholder",
-  "version": "0.1.0",
-  "kind": "plugin",
-  "publish": { "registry": "default" }
-}
+## UAPKG source setup
+
+Both release creation and OIDC publishing build UAPKG directly from
+`MaximDevoir/uapkg`. Their common inputs are:
+
+- `uapkg_branch`: branch to build, defaulting to `main`.
+- `uapkg_environment`: `development` (default) or `production`.
+
+The selected environment is stamped into the CLI at build time:
+
+| Environment | Account/API routing | Default registry source |
+|---|---|---|
+| `development` | `account-dev.uapkg.dev` / `api-dev.uapkg.dev` | `uapkg/registry-dev-tmp` |
+| `production` | `account.uapkg.dev` / `api.uapkg.dev` | `uapkg/registry` |
+
+The setup action resolves the branch to an exact commit, installs the pnpm version declared
+by that source tree, performs a frozen install, and builds the CLI plus its runtime
+dependencies. The pnpm store and build outputs are cached by the exact source commit and
+environment, so repeated workflow runs do not rebuild unchanged UAPKG source.
+
+## Create releases
+
+Run **Create GitHub releases** from the Actions tab on `main`. The `versions` input accepts
+one or more comma-separated SemVers without a leading `v`:
+
+```text
+0.2.0,0.3.0
 ```
 
-- `name` — lowercase, hyphenated package name.
-- `version` — semver; should match the pushed tag (minus the leading `v`).
-- `kind` — `plugin`.
-- `publish.registry` — target registry name. Change or remove to use your default registry.
-  Add `"private": true` to refuse publishing to the official public registry.
+The workflow validates the complete list and checks every requested release and tag before
+creating anything. It builds UAPKG once, then performs the following cycle for each version:
 
-## How publishing is wired
+1. Start from the same captured `main` commit.
+2. Set `uapkg.json.version` and the `.uplugin` `VersionName`.
+3. Keep the fixture's numeric `.uplugin` `Version` at `1`.
+4. Pack and verify `uapkg-dev-package-placeholder-<version>.tgz` and its integrity sidecar.
+5. Create an independent tag-only commit and annotated `v<version>` tag.
+6. Push only the tag and create a GitHub Release with the two assets.
 
-The workflow triggers on **pushing a git tag that starts with `v`**:
+The default branch is never moved by a release run. A tag pushed by an interrupted run can
+be resumed when it has no release and its commit contains only the expected version changes.
+Completed earlier items remain available if a later item in the batch fails.
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0        # this push starts the workflow
+The numeric Unreal `Version` normally increases between real plugin releases. It remains
+`1` here intentionally because this repository tests UAPKG release mechanics rather than
+Unreal plugin upgrade ordering.
+
+## Delete releases
+
+Run **Delete GitHub releases and tags** on `main` with comma-separated SemVers or tags:
+
+```text
+v0.2.0,0.3.0
 ```
 
-or, without cloning:
+The workflow preflights the entire list, then deletes both the GitHub Release and its tag.
+It also repairs partial states containing only a release or only a tag. Deletion is permanent;
+use **Create GitHub releases** again to rebuild a deleted fixture from the current `main`.
 
-```bash
-gh release create v0.1.0 --repo MaximDevoir/uapkg-dev-package-placeholder --generate-notes
-```
+## Publish with OIDC
 
-On each `v*` tag the workflow:
+Run **Publish release with OIDC** on `main` with one existing release version. The workflow:
 
-1. Checks out the repo (with Git LFS).
-2. Installs the `@uapkg/cli`.
-3. Runs `uapkg pack` to produce `dist/uapkg-dev-package-placeholder-<version>.tgz` (+ integrity).
-4. Creates a GitHub Release for the tag and uploads the packed artifact.
-5. **Publish step (placeholder):** `uapkg publish` is not in the CLI yet, so this step is
-   currently inert and carries the intended command as a comment. Once the CLI implements
-   publish, uncomment it. It relies on GitHub Actions **OIDC trusted publishing**
-   (`id-token: write`), and falls back to a `UAPKG_TOKEN` PAT secret for the initial publish.
+1. Downloads the versioned archive and integrity sidecar from the GitHub Release.
+2. Verifies the exact size and SHA-256 digest.
+3. Builds the requested UAPKG branch and environment.
+4. Checks the release tag's committed manifest versions.
+5. Runs `uapkg publish --auth oidc` with the explicit tag, asset name, repository, and local
+   archive path.
 
-To publish a new version later: bump `version` in `uapkg.json`, commit, and push a matching
-tag (e.g. `v0.2.0`).
+Before this can succeed, the UAPKG account must have active GitHub User App coverage for the
+canonical package source and a trusted-publisher rule bound to:
 
-## Setting up trusted publishing (for when `uapkg publish` lands)
+- repository `MaximDevoir/uapkg-dev-package-placeholder`;
+- workflow `publish-oidc.yml`;
+- event `workflow_dispatch`;
+- branch `main`, if the rule restricts refs;
+- audience `uapkg`.
 
-Trusted publishing lets the workflow publish with a short-lived OIDC token instead of a
-long-lived PAT. Rough setup (see the UAPKG spec §12):
+The workflow grants `id-token: write` and does not use a long-lived publishing secret.
+Account-side trusted-publisher setup is intentionally outside this repository change.
 
-1. Create a UAPKG account and complete MFA.
-2. Do the **initial** publish of this package with a UAPKG PAT (OIDC can't publish a package
-   that doesn't exist yet). Until the CLI has `publish`, this is a manual/registry step.
-3. Link your GitHub account via the UAPKG GitHub User App and install it on this repo.
-4. Create a trusted publisher rule binding:
-   - `provider = github-actions`
-   - owner `MaximDevoir`, repo `uapkg-dev-package-placeholder`
-   - workflow file `publish.yml`
-5. After that, `uapkg publish` runs in this workflow will auto-exchange the GitHub Actions
-   OIDC token (`id-token: write` is already granted) — no secret needed.
+## GAT and CLI login
 
-Until trusted publishing is set up, use the PAT fallback documented in `publish.yml`
-(`UAPKG_TOKEN` repo secret).
+There is no GAT publishing workflow. The current UAPKG security model requires an attended
+TTY and a fresh TOTP for GAT publishing, so it deliberately rejects GAT in headless CI.
+Persistent CLI login is also unsupported in CI. Automated publishing therefore uses OIDC.
 
-> This is a development/test artifact — not intended for real use.
+> This repository and its releases are development fixtures, not production plugin builds.

@@ -1,0 +1,157 @@
+name: Setup UAPKG from source
+description: Build and expose the UAPKG CLI from a selected source branch and environment.
+
+inputs:
+  branch:
+    description: Branch in MaximDevoir/uapkg to build.
+    required: false
+    default: main
+  environment:
+    description: Build-stamped UAPKG environment (development or production).
+    required: false
+    default: development
+
+outputs:
+  source-sha:
+    description: Exact UAPKG source commit that was built.
+    value: ${{ steps.source.outputs.sha }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate source inputs
+      shell: bash
+      env:
+        UAPKG_BRANCH: ${{ inputs.branch }}
+        UAPKG_ENVIRONMENT: ${{ inputs.environment }}
+      run: |
+        set -euo pipefail
+        if [[ -z "$UAPKG_BRANCH" ]]; then
+          echo "::error::UAPKG branch cannot be empty."
+          exit 1
+        fi
+        if [[ "$UAPKG_ENVIRONMENT" != "development" && "$UAPKG_ENVIRONMENT" != "production" ]]; then
+          echo "::error::UAPKG environment must be development or production."
+          exit 1
+        fi
+        git check-ref-format --branch "$UAPKG_BRANCH" > /dev/null
+
+    - name: Checkout and resolve UAPKG source
+      id: source
+      shell: bash
+      env:
+        UAPKG_BRANCH: ${{ inputs.branch }}
+      run: |
+        set -euo pipefail
+        source_dir="$RUNNER_TEMP/uapkg-source"
+        if [[ -e "$source_dir" ]]; then
+          echo "::error::The isolated UAPKG source directory already exists: $source_dir"
+          exit 1
+        fi
+        git init "$source_dir"
+        git -C "$source_dir" remote add origin https://github.com/MaximDevoir/uapkg.git
+        git -C "$source_dir" fetch --depth=1 origin "+refs/heads/$UAPKG_BRANCH:refs/remotes/origin/selected"
+        git -C "$source_dir" checkout --detach refs/remotes/origin/selected
+
+        package_manager="$(node -p "require('$source_dir/package.json').packageManager")"
+        if [[ ! "$package_manager" =~ ^pnpm@(.+)$ ]]; then
+          echo "::error::UAPKG package.json must pin pnpm through packageManager."
+          exit 1
+        fi
+
+        {
+          echo "sha=$(git -C "$source_dir" rev-parse HEAD)"
+          echo "pnpm-version=${BASH_REMATCH[1]}"
+          echo "lock-sha=$(sha256sum "$source_dir/pnpm-lock.yaml" | cut -d' ' -f1)"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v6
+      with:
+        node-version: 24
+
+    - name: Setup pnpm from UAPKG packageManager
+      uses: pnpm/action-setup@v6
+      with:
+        version: ${{ steps.source.outputs.pnpm-version }}
+
+    - name: Verify pnpm version
+      shell: bash
+      env:
+        EXPECTED_PNPM_VERSION: ${{ steps.source.outputs.pnpm-version }}
+      run: |
+        set -euo pipefail
+        actual_version="$(pnpm --version)"
+        if [[ "$actual_version" != "$EXPECTED_PNPM_VERSION" ]]; then
+          echo "::error::Expected pnpm $EXPECTED_PNPM_VERSION from UAPKG packageManager, received $actual_version."
+          exit 1
+        fi
+
+    - name: Resolve pnpm store path
+      id: pnpm-store
+      shell: bash
+      run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+    - name: Restore pnpm store
+      uses: actions/cache@v5
+      with:
+        path: ${{ steps.pnpm-store.outputs.path }}
+        key: uapkg-pnpm-store-v1-${{ runner.os }}-${{ runner.arch }}-node24-${{ steps.source.outputs.sha }}-${{ inputs.environment }}-${{ steps.source.outputs.lock-sha }}
+
+    - name: Install UAPKG dependencies
+      shell: bash
+      run: pnpm --dir="$RUNNER_TEMP/uapkg-source" install --frozen-lockfile
+
+    - name: Restore UAPKG build outputs
+      id: build-cache
+      uses: actions/cache@v5
+      with:
+        path: |
+          ${{ runner.temp }}/uapkg-source/.nx/cache
+          ${{ runner.temp }}/uapkg-source/packages/*/dist
+        key: uapkg-source-build-v1-${{ runner.os }}-${{ runner.arch }}-node24-${{ steps.source.outputs.sha }}-${{ inputs.environment }}
+
+    - name: Build UAPKG CLI and runtime dependencies
+      shell: bash
+      env:
+        CACHE_HIT: ${{ steps.build-cache.outputs.cache-hit }}
+        UAPKG_ENVIRONMENT: ${{ inputs.environment }}
+      run: |
+        set -euo pipefail
+        source_dir="$RUNNER_TEMP/uapkg-source"
+        cli="$source_dir/packages/uapkg/dist/cli.js"
+        needs_build=true
+        if [[ "$CACHE_HIT" == "true" && -f "$cli" ]] && node "$cli" --version > /dev/null 2>&1; then
+          needs_build=false
+        fi
+        if [[ "$needs_build" == "true" ]]; then
+          pnpm --dir="$source_dir" nx run "uapkg:build:$UAPKG_ENVIRONMENT"
+        else
+          echo "Restored UAPKG build outputs from the exact-source cache."
+        fi
+
+    - name: Expose and verify UAPKG CLI
+      shell: bash
+      env:
+        UAPKG_ENVIRONMENT: ${{ inputs.environment }}
+      run: |
+        set -euo pipefail
+        cli="$RUNNER_TEMP/uapkg-source/packages/uapkg/dist/cli.js"
+        test -f "$cli"
+        chmod +x "$cli"
+
+        bin_dir="$RUNNER_TEMP/uapkg-bin"
+        mkdir -p "$bin_dir"
+        ln -sfn "$cli" "$bin_dir/uapkg"
+        echo "$bin_dir" >> "$GITHUB_PATH"
+
+        version_output="$(node "$cli" --version 2>&1)"
+        printf '%s\n' "$version_output"
+        if [[ "$UAPKG_ENVIRONMENT" == "development" && "$version_output" != *"development-mode"* ]]; then
+          echo "::error::The built CLI was not stamped for development."
+          exit 1
+        fi
+        if [[ "$UAPKG_ENVIRONMENT" == "production" && "$version_output" == *"development-mode"* ]]; then
+          echo "::error::The built CLI was unexpectedly stamped for development."
+          exit 1
+        fi

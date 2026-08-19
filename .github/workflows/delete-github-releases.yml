@@ -1,0 +1,151 @@
+name: Delete GitHub releases and tags
+run-name: Delete ${{ inputs.releases }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      releases:
+        description: Comma-separated SemVers or v-prefixed tags to delete.
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: uapkg-dev-package-placeholder-release-mutations
+  cancel-in-progress: false
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Require a main-branch dispatch
+        shell: bash
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$DISPATCH_REF" != "refs/heads/main" ]]; then
+            echo "::error::Run this workflow from the main branch."
+            exit 1
+          fi
+
+      - name: Checkout package repository
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Normalize requested releases
+        id: releases
+        shell: bash
+        env:
+          RAW_RELEASES: ${{ inputs.releases }}
+        run: |
+          set -euo pipefail
+          tags_file="$RUNNER_TEMP/delete-tags.txt"
+          node .github/scripts/release-tools.mjs normalize-tags "$RAW_RELEASES" > "$tags_file"
+          echo "file=$tags_file" >> "$GITHUB_OUTPUT"
+          echo "Requested tags:"
+          sed 's/^/  - /' "$tags_file"
+
+      - name: Preflight releases and tags
+        id: preflight
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAGS_FILE: ${{ steps.releases.outputs.file }}
+        run: |
+          set -euo pipefail
+          releases_file="$RUNNER_TEMP/existing-releases.txt"
+          remote_tags_file="$RUNNER_TEMP/existing-tags.txt"
+          plan_file="$RUNNER_TEMP/delete-plan.tsv"
+
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name' > "$releases_file"
+          git ls-remote --tags --refs origin | awk '{print $2}' > "$remote_tags_file"
+          : > "$plan_file"
+
+          while IFS= read -r tag; do
+            release_exists=false
+            tag_exists=false
+            grep -Fqx -- "$tag" "$releases_file" && release_exists=true
+            grep -Fqx -- "refs/tags/$tag" "$remote_tags_file" && tag_exists=true
+            if [[ "$release_exists" == "false" && "$tag_exists" == "false" ]]; then
+              echo "::error::Neither a release nor a tag exists for $tag. No deletions were started."
+              exit 1
+            fi
+            printf '%s\t%s\t%s\n' "$tag" "$release_exists" "$tag_exists" >> "$plan_file"
+          done < "$TAGS_FILE"
+
+          echo "file=$plan_file" >> "$GITHUB_OUTPUT"
+          echo "Deletion plan:"
+          column -t -s $'\t' "$plan_file"
+
+      - name: Delete releases and tags
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLAN_FILE: ${{ steps.preflight.outputs.file }}
+        run: |
+          set -Eeuo pipefail
+          mapfile -t entries < "$PLAN_FILE"
+          completed=()
+          current_index=0
+          current_tag="preparation"
+
+          report_failure() {
+            status=$?
+            set +e
+            {
+              echo "### Deletion batch stopped"
+              echo
+              echo "- Failed while processing: \`$current_tag\`"
+              if (( ${#completed[@]} > 0 )); then
+                echo "- Deleted: \`$(IFS=,; echo "${completed[*]}")\`"
+              fi
+              if (( current_index + 1 < ${#entries[@]} )); then
+                echo "- Not processed:"
+                for ((remaining = current_index + 1; remaining < ${#entries[@]}; remaining++)); do
+                  IFS=$'\t' read -r pending_tag _ _ <<< "${entries[$remaining]}"
+                  echo "  - \`$pending_tag\`"
+                done
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "$status"
+          }
+          trap report_failure ERR
+
+          for current_index in "${!entries[@]}"; do
+            IFS=$'\t' read -r current_tag release_exists tag_exists <<< "${entries[$current_index]}"
+            if [[ "$release_exists" == "true" && "$tag_exists" == "true" ]]; then
+              gh release delete "$current_tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+            elif [[ "$release_exists" == "true" ]]; then
+              gh release delete "$current_tag" --repo "$GITHUB_REPOSITORY" --yes
+            elif [[ "$tag_exists" == "true" ]]; then
+              git push origin ":refs/tags/$current_tag"
+            fi
+            completed+=("$current_tag")
+          done
+
+          remaining_releases="$RUNNER_TEMP/remaining-releases.txt"
+          remaining_tags="$RUNNER_TEMP/remaining-tags.txt"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name' > "$remaining_releases"
+          git ls-remote --tags --refs origin | awk '{print $2}' > "$remaining_tags"
+          for entry in "${entries[@]}"; do
+            IFS=$'\t' read -r tag _ _ <<< "$entry"
+            if grep -Fqx -- "$tag" "$remaining_releases" || grep -Fqx -- "refs/tags/$tag" "$remaining_tags"; then
+              echo "::error::$tag still has a release or tag after deletion."
+              exit 1
+            fi
+          done
+
+          trap - ERR
+          {
+            echo "### Releases and tags deleted"
+            echo
+            for tag in "${completed[@]}"; do
+              echo "- \`$tag\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"

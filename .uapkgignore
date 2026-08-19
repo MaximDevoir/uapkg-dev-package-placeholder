@@ -1,0 +1,13 @@
+# Repository and automation metadata are not part of the Unreal plugin.
+.git
+.github/
+.gitignore
+.uapkgignore
+
+# Toolchain checkouts, dependencies, caches, and generated packages.
+.uapkg-source/
+node_modules/
+.nx/
+dist/
+*.tgz
+*.tgz.integrity

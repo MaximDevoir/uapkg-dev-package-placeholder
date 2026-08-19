@@ -1,0 +1,205 @@
+name: Publish release with OIDC
+run-name: Publish v${{ inputs.version }} with OIDC (${{ inputs.uapkg_environment }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing GitHub Release SemVer without a leading v.
+        required: true
+        type: string
+      uapkg_branch:
+        description: Branch of MaximDevoir/uapkg to build.
+        required: true
+        default: main
+        type: string
+      uapkg_environment:
+        description: Endpoint environment stamped into the UAPKG build.
+        required: true
+        default: development
+        type: choice
+        options:
+          - development
+          - production
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: uapkg-dev-package-placeholder-publish-${{ inputs.uapkg_environment }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Require a main-branch dispatch
+        shell: bash
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$DISPATCH_REF" != "refs/heads/main" ]]; then
+            echo "::error::Run this workflow from main so the OIDC ref claim matches the documented trusted-publisher policy."
+            exit 1
+          fi
+
+      - name: Checkout package repository
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Normalize release version
+        id: version
+        shell: bash
+        env:
+          RAW_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          mapfile -t versions < <(node .github/scripts/release-tools.mjs normalize-versions "$RAW_VERSION")
+          if [[ "${#versions[@]}" -ne 1 ]]; then
+            echo "::error::OIDC publishing accepts exactly one release version per run."
+            exit 1
+          fi
+          {
+            echo "value=${versions[0]}"
+            echo "tag=v${versions[0]}"
+            echo "asset=uapkg-dev-package-placeholder-${versions[0]}.tgz"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve release tag and download exact assets
+        id: artifact
+        shell: bash
+        env:
+          ASSET_NAME: ${{ steps.version.outputs.asset }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          if [[ "$(git cat-file -t "refs/tags/$RELEASE_TAG")" != "tag" ]]; then
+            echo "::error::$RELEASE_TAG must be an annotated tag."
+            exit 1
+          fi
+
+          release_commit="$(git rev-parse "$RELEASE_TAG^{commit}")"
+          if ! git merge-base --is-ancestor "$release_commit" origin/main; then
+            read -ra ancestry <<< "$(git rev-list --parents -n 1 "$release_commit")"
+            if [[ "${#ancestry[@]}" -ne 2 ]]; then
+              echo "::error::$RELEASE_TAG must point to main history or a one-parent release commit."
+              exit 1
+            fi
+            release_parent="${ancestry[1]}"
+            if ! git merge-base --is-ancestor "$release_parent" origin/main; then
+              echo "::error::$RELEASE_TAG is not based on main history."
+              exit 1
+            fi
+            mapfile -t release_files < <(git diff --name-only "$release_parent" "$release_commit" | sort)
+            if [[ "${#release_files[@]}" -ne 2 || "${release_files[0]}" != "UapkgDevPlaceholder.uplugin" || "${release_files[1]}" != "uapkg.json" ]]; then
+              echo "::error::$RELEASE_TAG contains changes beyond the two release version files."
+              exit 1
+            fi
+          fi
+
+          artifact_dir="$RUNNER_TEMP/publish-artifact"
+          mkdir -p "$artifact_dir"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$ASSET_NAME" \
+            --pattern "$ASSET_NAME.integrity" \
+            --dir "$artifact_dir"
+
+          archive="$artifact_dir/$ASSET_NAME"
+          integrity="$archive.integrity"
+          test -s "$archive"
+          test -s "$integrity"
+          expected_integrity="$(printf 'size-%s\nsha256-%s' \
+            "$(stat -c '%s' "$archive")" \
+            "$(sha256sum "$archive" | cut -d' ' -f1)")"
+          actual_integrity="$(cat "$integrity")"
+          if [[ "$actual_integrity" != "$expected_integrity" ]]; then
+            echo "::error::The downloaded release asset does not match its integrity sidecar."
+            exit 1
+          fi
+
+          archive_list="$artifact_dir/archive.txt"
+          tar -tzf "$archive" > "$archive_list"
+          archive_version="${VERSION%%+*}"
+          prefix="uapkg-dev-package-placeholder-$archive_version"
+          grep -Fqx -- "$prefix/uapkg.json" "$archive_list"
+          grep -Fqx -- "$prefix/UapkgDevPlaceholder.uplugin" "$archive_list"
+          if awk -v expected_prefix="$prefix/" 'index($0, expected_prefix) != 1 { print; invalid = 1 } END { exit invalid }' "$archive_list"; then
+            :
+          else
+            echo "::error::The release archive contains entries outside $prefix/."
+            exit 1
+          fi
+          if grep -Eq '(^|/)(\.git|\.github|\.uapkg-source|dist)(/|$)' "$archive_list"; then
+            echo "::error::The release archive contains repository or build metadata."
+            exit 1
+          fi
+
+          archive_source="$artifact_dir/archive-source"
+          mkdir -p "$archive_source"
+          tar -xOf "$archive" "$prefix/uapkg.json" > "$archive_source/uapkg.json"
+          tar -xOf "$archive" "$prefix/UapkgDevPlaceholder.uplugin" > "$archive_source/UapkgDevPlaceholder.uplugin"
+          node .github/scripts/release-tools.mjs verify-version "$archive_source" "$VERSION"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Build UAPKG from source
+        id: uapkg
+        uses: ./.github/actions/setup-uapkg
+        with:
+          branch: ${{ inputs.uapkg_branch }}
+          environment: ${{ inputs.uapkg_environment }}
+
+      - name: Verify tagged package source
+        id: source
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          worktree="$RUNNER_TEMP/publish-source"
+          git worktree add --detach "$worktree" "$RELEASE_TAG^{commit}"
+          node .github/scripts/release-tools.mjs verify-version "$worktree" "$VERSION"
+          echo "path=$worktree" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release through GitHub Actions OIDC
+        shell: bash
+        env:
+          ARCHIVE_PATH: ${{ steps.artifact.outputs.archive }}
+          ASSET_NAME: ${{ steps.version.outputs.asset }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          SOURCE_PATH: ${{ steps.source.outputs.path }}
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_PATH"
+          uapkg publish \
+            --auth oidc \
+            --registry default \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --asset "$ASSET_NAME" \
+            --asset-path "$ARCHIVE_PATH"
+
+      - name: Record publication inputs
+        if: success()
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          UAPKG_ENVIRONMENT: ${{ inputs.uapkg_environment }}
+          UAPKG_SOURCE_SHA: ${{ steps.uapkg.outputs.source-sha }}
+        run: |
+          {
+            echo "### OIDC publication completed"
+            echo
+            echo "- Release: \`$RELEASE_TAG\`"
+            echo "- UAPKG source: \`$UAPKG_SOURCE_SHA\`"
+            echo "- UAPKG environment: \`$UAPKG_ENVIRONMENT\`"
+          } >> "$GITHUB_STEP_SUMMARY"
