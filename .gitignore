@@ -78,3 +78,7 @@ DerivedDataCache/*
 
 # Packed artifacts produced by `uapkg pack` in CI
 dist/
+
+# packaged builds
+*.tgz
+*.tgz.integrity
