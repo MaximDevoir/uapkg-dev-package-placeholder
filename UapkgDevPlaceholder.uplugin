@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "0.1.0",
+	"VersionName": "0.3.0",
 	"FriendlyName": "UAPKG Dev Placeholder",
 	"Description": "Barebones placeholder Unreal Engine plugin used to test UAPKG publishing end-to-end. Not for production use.",
 	"Category": "UAPKG",
