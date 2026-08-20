@@ -42,7 +42,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$DISPATCH_REF" != "refs/heads/main" ]]; then
-            echo "::error::Run this workflow from main so the OIDC ref claim matches the documented trusted-publisher policy."
+            echo "::error::Run this workflow from main; this fixture intentionally publishes releases only from its main branch."
             exit 1
           fi
 

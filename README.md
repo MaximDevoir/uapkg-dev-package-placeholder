@@ -97,17 +97,20 @@ canonical package source. Add the trusted-publisher rule with these exact accoun
 
 - repository `MaximDevoir/uapkg-dev-package-placeholder`;
 - workflow path `.github/workflows/publish-oidc.yml`;
-- exact event `workflow_dispatch`;
-- exact branch or tag ref `refs/heads/main`;
 - environment left blank;
 - audience `uapkg`.
+
+UAPKG authorizes the canonical repository and exact workflow path, plus an exact job-level
+GitHub Environment only when one is configured. It does not restrict the GitHub event,
+branch, tag, or ref. This fixture still chooses to allow only a manual dispatch from `main`
+inside its own workflow so release publication remains deliberate.
 
 The workflow's `uapkg_environment` dispatch input should remain `development` when publishing
 to the development registry. That input selects the endpoints stamped into the UAPKG CLI; it
 does not configure a GitHub job environment or add an `environment` claim to the OIDC token.
 
 The workflow grants `id-token: write` and does not use a long-lived publishing secret.
-Account-side trusted-publisher setup is intentionally outside this repository change.
+Account-side trusted-publisher setup remains package-scoped in the UAPKG account application.
 
 ## GAT and CLI login
 
