@@ -93,13 +93,18 @@ Run **Publish release with OIDC** on `main` with one existing release version. T
    archive path.
 
 Before this can succeed, the UAPKG account must have active GitHub User App coverage for the
-canonical package source and a trusted-publisher rule bound to:
+canonical package source. Add the trusted-publisher rule with these exact account-form values:
 
 - repository `MaximDevoir/uapkg-dev-package-placeholder`;
-- workflow `publish-oidc.yml`;
-- event `workflow_dispatch`;
-- branch `main`, if the rule restricts refs;
+- workflow path `.github/workflows/publish-oidc.yml`;
+- exact event `workflow_dispatch`;
+- exact branch or tag ref `refs/heads/main`;
+- environment left blank;
 - audience `uapkg`.
+
+The workflow's `uapkg_environment` dispatch input should remain `development` when publishing
+to the development registry. That input selects the endpoints stamped into the UAPKG CLI; it
+does not configure a GitHub job environment or add an `environment` claim to the OIDC token.
 
 The workflow grants `id-token: write` and does not use a long-lived publishing secret.
 Account-side trusted-publisher setup is intentionally outside this repository change.
